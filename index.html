@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qawali Night - Entry Scanner</title>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+  :root { --ink:#1d1a16; --paper:#f6f1e7; --card:#fffdf8; --line:#d9cfba;
+          --ok:#14703a; --okbg:#d7f2df; --bad:#a30f1f; --badbg:#fde0e2;
+          --warn:#8a5a00; --warnbg:#fdeccb; --gold:#9a6b12; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; background:var(--paper); color:var(--ink);
+         font-family: Georgia, "Times New Roman", serif; }
+  .wrap { max-width:480px; margin:0 auto; }
+  h1 { font-size:30px; margin:8px 0 2px; letter-spacing:.3px; }
+  .sub { margin:0 0 18px; color:var(--gold); font-style:italic; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; }
+  label { font-size:14px; }
+  input { width:100%; padding:12px; margin:6px 0 12px; font-size:16px;
+          border:1px solid var(--line); border-radius:8px; background:#fff; }
+  button { padding:14px 18px; font-size:17px; border:0; border-radius:8px;
+           background:var(--ink); color:#fff; cursor:pointer; font-family:inherit; }
+  button:focus-visible, input:focus-visible { outline:3px solid var(--gold); outline-offset:2px; }
+  button:disabled { opacity:.45; }
+  .row { display:flex; gap:10px; }
+  .row button { flex:1; }
+  .alt { background:#6b6256; }
+  #reader { width:100%; margin:14px 0; min-height:10px; }
+  #result { margin-top:14px; padding:22px 14px; border-radius:10px; text-align:center;
+            background:#eee8da; font-size:18px; white-space:pre-wrap; overflow-wrap:anywhere; }
+  #result .big { display:block; font-size:30px; font-weight:bold; margin-bottom:8px; }
+  #result.ok { background:var(--okbg); color:var(--ok); }
+  #result.bad { background:var(--badbg); color:var(--bad); }
+  #result.warn { background:var(--warnbg); color:var(--warn); }
+  #count { margin-top:12px; font-size:14px; color:#6b6256; text-align:center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Qawali Night</h1>
+  <p class="sub">Entry gate scanner</p>
+
+  <div class="card">
+    <label for="pin">Gate PIN</label>
+    <input id="pin" type="password" autocomplete="off" placeholder="Enter the gate PIN">
+
+    <div class="row">
+      <button id="startBtn">Start camera</button>
+      <button id="stopBtn" class="alt" disabled>Stop camera</button>
+    </div>
+
+    <div id="reader"></div>
+    <div id="result" aria-live="polite">Enter the PIN, then start the camera.</div>
+    <div id="count">Accepted on this phone: <span id="n">0</span></div>
+  </div>
+</div>
+
+<script>
+  // Paste the Web app URL of your "Scanner API" deployment (ends with /exec).
+  const API_URL = 'https://script.google.com/macros/s/AKfycbxBiyKdjG1UkuwKBmiyptKsMqDmH_kKOXn3WWGyVVbNvf85V_TowD_-TuB4wFxxjOWl/exec';
+
+  const $ = id => document.getElementById(id);
+  const pinInput = $('pin'), startBtn = $('startBtn'), stopBtn = $('stopBtn'), box = $('result');
+  let scanner = null, running = false, busy = false, accepted = 0;
+
+  try { pinInput.value = localStorage.getItem('gatePin') || ''; } catch (e) {}
+
+  function show(kind, title, lines) {
+    box.className = kind;
+    box.replaceChildren();
+    const b = document.createElement('span');
+    b.className = 'big';
+    b.textContent = title;
+    box.appendChild(b);
+    box.appendChild(document.createTextNode(lines || ''));
+    if (navigator.vibrate) navigator.vibrate(kind === 'ok' ? 120 : [200, 100, 200]);
+  }
+
+  async function start() {
+    if (busy || running) return;
+    const pin = pinInput.value.trim();
+    if (!pin) { show('bad', 'PIN needed', 'Enter the gate PIN first.'); return; }
+    if (API_URL.indexOf('PASTE_') === 0) { show('bad', 'Not set up', 'API_URL is missing in index.html.'); return; }
+    try { localStorage.setItem('gatePin', pin); } catch (e) {}
+
+    startBtn.disabled = true;
+    box.className = '';
+    box.textContent = 'Starting camera...';
+    try {
+      if (!window.Html5Qrcode) throw new Error('QR library did not load. Check the internet.');
+      if (!scanner) scanner = new Html5Qrcode('reader');
+      await scanner.start({ facingMode: 'environment' },
+        { fps: 10, qrbox: { width: 240, height: 240 } }, onScan, () => {});
+      running = true;
+      stopBtn.disabled = false;
+      box.textContent = 'Ready. Hold the ticket QR in front of the camera.';
+    } catch (err) {
+      startBtn.disabled = false;
+      show('bad', 'Camera error', String(err && err.message || err));
+    }
+  }
+
+  async function stop() {
+    if (scanner && running) { try { await scanner.stop(); } catch (e) {} }
+    running = false;
+    stopBtn.disabled = true;
+    startBtn.disabled = false;
+  }
+
+  async function onScan(text) {
+    if (busy) return;
+    busy = true;
+    await stop();
+    box.className = '';
+    box.textContent = 'Checking ticket...';
+
+    const url = API_URL + '?action=scan&key=' + encodeURIComponent(pinInput.value.trim()) +
+                '&token=' + encodeURIComponent(text);
+    try {
+      const res = await fetch(url);
+      const d = await res.json();
+      const who = (d.customer ? 'Name: ' + d.customer : '') + (d.ticketId ? '\nTicket: ' + d.ticketId : '');
+      if (d.success) {
+        accepted++; $('n').textContent = accepted;
+        show('ok', 'ENTRY OK', who + '\nTime: ' + d.checkedInAt);
+      } else if (d.status === 'ALREADY_USED') {
+        show('bad', 'ALREADY USED', who + '\nDo not allow entry.');
+      } else if (d.status === 'UNPAID') {
+        show('warn', 'PAYMENT PENDING', who + '\nSend to the help desk.');
+      } else if (d.status === 'BAD_KEY') {
+        show('bad', 'WRONG PIN', 'Check the gate PIN and try again.');
+      } else {
+        show('bad', 'INVALID TICKET', d.message || 'Do not allow entry.');
+      }
+    } catch (err) {
+      show('warn', 'NO RESPONSE', 'Ticket was NOT checked. Check the internet and scan again.');
+    }
+    busy = false;
+    startBtn.textContent = 'Scan next ticket';
+    startBtn.disabled = false;
+  }
+
+  startBtn.addEventListener('click', start);
+  stopBtn.addEventListener('click', stop);
+</script>
+</body>
+</html>
